@@ -1,0 +1,23 @@
+[project]
+name = "postgresql2cosmosdb"
+version = "0.1.0"
+description = "Azure PostgreSQL to Cosmos DB migration tool"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "psycopg2-binary>=2.9.9",
+    "azure-cosmos>=4.5.1",
+    "python-dotenv>=1.0.0",
+    "azure-identity>=1.25.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/postgresql2cosmosdb"]
+
+[project.scripts]
+migrate = "postgresql2cosmosdb.migrate:main"
+validate = "postgresql2cosmosdb.validate:main"
