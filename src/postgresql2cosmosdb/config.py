@@ -24,6 +24,11 @@ COSMOS_CONFIG = {
     'container_id': os.getenv('COSMOS_CONTAINER_ID', 'auth-users')
 }
 
+# 마이그레이션 설정
+MIGRATION_CONFIG = {
+    'batch_size': int(os.getenv('MIGRATION_BATCH_SIZE', '1000'))
+}
+
 
 def validate_config():
     """필수 환경 변수가 설정되었는지 확인"""

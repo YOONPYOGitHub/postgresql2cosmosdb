@@ -10,7 +10,8 @@ Azure PostgreSQL에서 Cosmos DB for NoSQL로 사용자 인증 데이터를 안�
 ⚡ **빠른 실행**: uv 패키지 관리자를 사용한 빠른 의존성 설치  
 🔄 **멱등성 보장**: Upsert 방식으로 중복 실행 가능  
 📝 **자동 변환**: snake_case → camelCase, 타임스탬프 ISO 변환  
-📊 **상세 로깅**: 콘솔 및 파일 로그로 전체 프로세스 추적 가능
+📊 **상세 로깅**: 콘솔 및 파일 로그로 전체 프로세스 추적 가능  
+🗂️ **배치 처리**: 사용자를 배치 단위로 읽고 마이그레이션 (배치 크기 `.env`에서 설정)
 
 ## 프로젝트 구조
 
@@ -147,7 +148,7 @@ RBAC 권한은 전파되는데 **1-5분** 정도 걸릴 수 있습니다. 역할
 cp .env.example .env
 ```
 
-`.env` 파일 내용:
+`.env` 파일 예시 (자세한 옵션은 `.env.example` 참고):
 
 ```env
 # Azure PostgreSQL Configuration
@@ -162,9 +163,14 @@ POSTGRES_SSLMODE=require
 COSMOS_ENDPOINT=https://your-cosmosdb-account.documents.azure.com:443/
 COSMOS_DATABASE_ID=authdb
 COSMOS_CONTAINER_ID=auth-users
+
+# Migration Configuration
+MIGRATION_BATCH_SIZE=1000
 ```
 
 **참고**: Cosmos DB는 Entra ID 인증을 사용하므로 `COSMOS_KEY`가 필요하지 않습니다.
+
+**배치 크기**: `MIGRATION_BATCH_SIZE`로 한 번에 처리할 사용자 수를 조절할 수 있습니다 (기본값: 1000). 대용량 데이터나 메모리 상황에 맞게 조정하세요.
 
 ## 데이터베이스 스키마
 
@@ -210,7 +216,7 @@ CREATE TABLE auth_user (
 
 ## 실행 방법
 
-### 1. 마이그레이션 실행
+### 1. 마이그레이션 실행 (배치 처리)
 
 ```bash
 uv run migrate
@@ -222,22 +228,21 @@ uv run migrate
 uv run validate
 ```
 
-마이그레이션이 완료된 후 PostgreSQL과 Cosmos DB의 데이터가 정확하게 일치하는지 검증합니다.
+PostgreSQL은 배치로, Cosmos DB는 전체 쿼리로 데이터를 읽어 모든 필드를 비교합니다.
 
 ## 기능
 
 - ✅ **Entra ID 인증**: Microsoft Entra ID를 통한 안전한 인증
-- ✅ **데이터 마이그레이션**: PostgreSQL에서 Cosmos DB로 완전한 데이터 이전
-- ✅ **데이터 정합성 검증**: 마이그레이션 후 양쪽 DB 데이터 일치 여부 확인
+- ✅ **배치 데이터 마이그레이션**: 사용자를 배치 단위로 읽고 마이그레이션 (설정 가능)
+- ✅ **데이터 정합성 검증**: 마이그레이션 후 모든 필드를 비교 (PostgreSQL은 배치, Cosmos DB는 전체 쿼리)
 - ✅ **자동 변환**: snake_case → camelCase, 타임스탬프 ISO 형식 변환
 - ✅ **안전한 실행**: Upsert 방식으로 중복 실행 가능
-- ✅ **메타데이터 추가**: `_migrated`, `_migrationDate` 필드 자동 추가
 - ✅ **상세한 로깅**: 콘솔 + 파일 로그 (`migration.log`, `validation.log`)
 - ✅ **에러 핸들링**: 실패 통계 및 상세한 불일치 정보 제공
 
 ## 마이그레이션 로그 예시
 
-마이그레이션 실행 시 다음과 같이 로그가 출력됩니다:
+마이그레이션 실행 시 다음과 같이 (배치 처리 기준) 로그가 출력됩니다:
 
 ```
 2025-12-10 17:07:14 - INFO - ============================================================
@@ -276,19 +281,20 @@ uv run validate
 - ✅ Microsoft Entra ID 인증 사용으로 Key 노출 위험 없음
 - ✅ PostgreSQL은 SSL 연결 사용 (`sslmode=require`)
 
-### 안전성
+### 안전성 & 배치 처리
 - ✅ **Upsert 방식**: 동일한 `id`로 여러 번 실행해도 안전 (멱등성 보장)
+- ✅ **배치 처리**: 사용자를 배치 단위로 읽고 마이그레이션 (기본 1000명, 설정 가능)
 - ✅ **자동 컨테이너 생성**: Cosmos DB 컨테이너가 없으면 자동 생성
 - ✅ **트랜잭션 로깅**: 모든 작업이 `migration.log`에 기록
 
-### 데이터 변환
+### 데이터 변환 & 검증
 - 📝 **필드명 변환**: PostgreSQL snake_case → Cosmos DB camelCase
   - `user_id` → `userId`
   - `password_hash` → `passwordHash`
   - `created_at` → `createdAt` 등
 - 🕐 **타임스탬프**: PostgreSQL TIMESTAMPTZ → ISO 8601 문자열
 - 🌐 **IP 주소**: PostgreSQL INET → 문자열
-- 📌 **메타데이터 추가**: `_migrated`, `_migrationDate` 필드 자동 추가
+- 🔍 **검증**: 마이그레이션 후 모든 필드를 비교 (PostgreSQL은 배치, Cosmos DB는 전체 쿼리)
 
 ## 기술 스택
 

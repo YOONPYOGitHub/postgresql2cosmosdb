@@ -9,7 +9,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
-from .config import POSTGRES_CONFIG, COSMOS_CONFIG, validate_config
+from .config import POSTGRES_CONFIG, COSMOS_CONFIG, MIGRATION_CONFIG, validate_config
 
 # 로깅 설정
 logging.basicConfig(
@@ -71,27 +71,67 @@ class DataValidator:
             return False
     
     def fetch_postgresql_users(self):
-        """PostgreSQL에서 모든 사용자 조회"""
+        """PostgreSQL에서 모든 사용자 조회 (배치 처리)"""
+        all_users = {}
+        batch_size = MIGRATION_CONFIG['batch_size']
+        last_user_id = None
+        total_count = 0
+        
         try:
-            with self.pg_connection.cursor(cursor_factory=RealDictCursor) as cursor:
-                query = """
-                    SELECT 
-                        user_id,
-                        email,
-                        password_hash,
-                        status,
-                        created_at,
-                        last_login_at,
-                        last_login_ip,
-                        failed_login_count,
-                        locked_until
-                    FROM auth_user
-                    ORDER BY user_id
-                """
-                cursor.execute(query)
-                users = cursor.fetchall()
-                logger.info(f"PostgreSQL: {len(users)}명 조회")
-                return {user['user_id']: dict(user) for user in users}
+            while True:
+                with self.pg_connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                    if last_user_id:
+                        query = """
+                            SELECT 
+                                user_id,
+                                email,
+                                password_hash,
+                                status,
+                                created_at,
+                                last_login_at,
+                                last_login_ip,
+                                failed_login_count,
+                                locked_until
+                            FROM auth_user
+                            WHERE user_id > %s
+                            ORDER BY user_id
+                            LIMIT %s
+                        """
+                        cursor.execute(query, (last_user_id, batch_size))
+                    else:
+                        query = """
+                            SELECT 
+                                user_id,
+                                email,
+                                password_hash,
+                                status,
+                                created_at,
+                                last_login_at,
+                                last_login_ip,
+                                failed_login_count,
+                                locked_until
+                            FROM auth_user
+                            ORDER BY user_id
+                            LIMIT %s
+                        """
+                        cursor.execute(query, (batch_size,))
+                    
+                    users = cursor.fetchall()
+                    
+                    if not users:
+                        break
+                    
+                    for user in users:
+                        all_users[user['user_id']] = dict(user)
+                    
+                    total_count += len(users)
+                    last_user_id = users[-1]['user_id']
+                    
+                    if len(users) < batch_size:
+                        break
+            
+            logger.info(f"PostgreSQL: {total_count}명 조회")
+            return all_users
         except Exception as e:
             logger.error(f"PostgreSQL 데이터 조회 실패: {e}")
             raise
@@ -99,7 +139,7 @@ class DataValidator:
     def fetch_cosmosdb_users(self):
         """Cosmos DB에서 모든 사용자 조회"""
         try:
-            query = "SELECT * FROM c WHERE c._migrated = true"
+            query = "SELECT * FROM c ORDER BY c.userId"
             items = list(self.cosmos_container.query_items(
                 query=query,
                 enable_cross_partition_query=True

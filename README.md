@@ -10,7 +10,8 @@ A Python tool for securely migrating user authentication data from Azure Postgre
 ⚡ **Fast Execution**: Quick dependency installation using the uv package manager  
 🔄 **Idempotency Guaranteed**: Repeatable execution using Upsert method  
 📝 **Automatic Conversion**: snake_case → camelCase, timestamp ISO conversion  
-📊 **Detailed Logging**: Full process tracking with console and file logs
+📊 **Detailed Logging**: Full process tracking with console and file logs  
+🗂️ **Batch Processing**: Reads and migrates users in batches (configurable via `.env`)
 
 ## Project Structure
 
@@ -147,7 +148,7 @@ Copy the `.env.example` file to create a `.env` file and modify with actual valu
 cp .env.example .env
 ```
 
-`.env` file contents:
+`.env` file contents (see `.env.example` for all options):
 
 ```env
 # Azure PostgreSQL Configuration
@@ -162,9 +163,14 @@ POSTGRES_SSLMODE=require
 COSMOS_ENDPOINT=https://your-cosmosdb-account.documents.azure.com:443/
 COSMOS_DATABASE_ID=authdb
 COSMOS_CONTAINER_ID=auth-users
+
+# Migration Configuration
+MIGRATION_BATCH_SIZE=1000
 ```
 
 **Note**: `COSMOS_KEY` is not required as Cosmos DB uses Entra ID authentication.
+
+**Batch Size**: `MIGRATION_BATCH_SIZE` controls how many users are processed per batch (default: 1000). Adjust for large datasets or memory constraints.
 
 ## Database Schema
 
@@ -210,7 +216,9 @@ Document structure:
 
 ## Execution
 
-### 1. Run Migration
+or (if using Python directly):
+or
+### 1. Run Migration (Batch Processing)
 
 ```bash
 uv run migrate
@@ -222,22 +230,21 @@ uv run migrate
 uv run validate
 ```
 
-After migration completes, this validates that data in PostgreSQL and Cosmos DB match exactly.
+This will compare all user data between PostgreSQL and Cosmos DB. PostgreSQL is read in batches, Cosmos DB is read all at once.
 
 ## Features
 
 - ✅ **Entra ID Authentication**: Secure authentication through Microsoft Entra ID
-- ✅ **Data Migration**: Complete data transfer from PostgreSQL to Cosmos DB
-- ✅ **Data Integrity Validation**: Check data consistency between both databases after migration
+- ✅ **Batch Data Migration**: Reads and migrates users in batches (configurable via `.env`)
+- ✅ **Data Integrity Validation**: Checks all user fields between PostgreSQL and Cosmos DB after migration
 - ✅ **Automatic Conversion**: snake_case → camelCase, timestamp ISO format conversion
 - ✅ **Safe Execution**: Repeatable execution using Upsert method
-- ✅ **Metadata Addition**: Automatic addition of `_migrated`, `_migrationDate` fields
 - ✅ **Detailed Logging**: Console + file logs (`migration.log`, `validation.log`)
 - ✅ **Error Handling**: Failure statistics and detailed discrepancy information
 
 ## Migration Log Example
 
-When running migration, logs are output as follows:
+When running migration, logs are output as follows (batch processing):
 
 ```
 2025-12-10 17:07:14 - INFO - ============================================================
@@ -276,19 +283,20 @@ Logs are saved to `migration.log` file simultaneously with console output.
 - ✅ No risk of key exposure using Microsoft Entra ID authentication
 - ✅ PostgreSQL uses SSL connection (`sslmode=require`)
 
-### Safety
+### Safety & Batch Processing
 - ✅ **Upsert Method**: Safe to run multiple times with the same `id` (idempotency guaranteed)
+- ✅ **Batch Processing**: Reads and migrates users in batches (default: 1000 per batch, configurable)
 - ✅ **Automatic Container Creation**: Automatically creates Cosmos DB container if it doesn't exist
 - ✅ **Transaction Logging**: All operations recorded in `migration.log`
 
-### Data Transformation
+### Data Transformation & Validation
 - 📝 **Field Name Conversion**: PostgreSQL snake_case → Cosmos DB camelCase
   - `user_id` → `userId`
   - `password_hash` → `passwordHash`
   - `created_at` → `createdAt`, etc.
 - 🕐 **Timestamp**: PostgreSQL TIMESTAMPTZ → ISO 8601 string
 - 🌐 **IP Address**: PostgreSQL INET → string
-- 📌 **Metadata Addition**: Automatic addition of `_migrated`, `_migrationDate` fields
+- 🔍 **Validation**: Compares all user fields (including timestamps, IP, etc.) between both databases after migration. PostgreSQL is read in batches, Cosmos DB is read all at once for validation.
 
 ## Tech Stack
 

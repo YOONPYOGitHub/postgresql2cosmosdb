@@ -8,7 +8,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from azure.cosmos import CosmosClient, PartitionKey, exceptions
 from azure.identity import DefaultAzureCredential
-from .config import POSTGRES_CONFIG, COSMOS_CONFIG, validate_config
+from .config import POSTGRES_CONFIG, COSMOS_CONFIG, MIGRATION_CONFIG, validate_config
 
 # 로깅 설정
 logging.basicConfig(
@@ -46,30 +46,53 @@ class PostgreSQLConnector:
             logger.error(f"PostgreSQL 연결 실패: {e}")
             return False
     
-    def fetch_users(self):
-        """auth_user 테이블에서 모든 사용자 데이터 조회"""
+    def fetch_users_batch(self, last_user_id=None, batch_size=None):
+        """auth_user 테이블에서 배치 단위로 사용자 데이터 조회 (Keyset Pagination)"""
+        if batch_size is None:
+            batch_size = MIGRATION_CONFIG['batch_size']
+        
         if not self.connection:
             raise Exception("PostgreSQL 연결이 설정되지 않았습니다")
         
         try:
             with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
-                query = """
-                    SELECT 
-                        user_id,
-                        email,
-                        password_hash,
-                        status,
-                        created_at,
-                        last_login_at,
-                        last_login_ip,
-                        failed_login_count,
-                        locked_until
-                    FROM auth_user
-                    ORDER BY user_id
-                """
-                cursor.execute(query)
+                if last_user_id:
+                    query = """
+                        SELECT 
+                            user_id,
+                            email,
+                            password_hash,
+                            status,
+                            created_at,
+                            last_login_at,
+                            last_login_ip,
+                            failed_login_count,
+                            locked_until
+                        FROM auth_user
+                        WHERE user_id > %s
+                        ORDER BY user_id
+                        LIMIT %s
+                    """
+                    cursor.execute(query, (last_user_id, batch_size))
+                else:
+                    query = """
+                        SELECT 
+                            user_id,
+                            email,
+                            password_hash,
+                            status,
+                            created_at,
+                            last_login_at,
+                            last_login_ip,
+                            failed_login_count,
+                            locked_until
+                        FROM auth_user
+                        ORDER BY user_id
+                        LIMIT %s
+                    """
+                    cursor.execute(query, (batch_size,))
+                
                 users = cursor.fetchall()
-                logger.info(f"PostgreSQL에서 {len(users)}명의 사용자 조회 완료")
                 return users
         except Exception as e:
             logger.error(f"사용자 데이터 조회 실패: {e}")
@@ -147,9 +170,7 @@ class CosmosDBConnector:
             'lastLoginAt': to_iso_string(pg_user['last_login_at']),
             'lastLoginIp': last_login_ip,
             'failedLoginCount': pg_user['failed_login_count'],
-            'lockedUntil': to_iso_string(pg_user['locked_until']),
-            '_migrated': True,
-            '_migrationDate': datetime.utcnow().isoformat()
+            'lockedUntil': to_iso_string(pg_user['locked_until'])
         }
         
         return cosmos_doc
@@ -195,21 +216,13 @@ def main():
         validate_config()
         logger.info("✓ 환경 변수 검증 완료")
         
-        # PostgreSQL 연결 및 데이터 조회
+        # PostgreSQL 연결
         pg_connector = PostgreSQLConnector(POSTGRES_CONFIG)
         if not pg_connector.connect():
             logger.error("PostgreSQL 연결 실패로 마이그레이션 중단")
             sys.exit(1)
         
-        logger.info("PostgreSQL에서 사용자 데이터 조회 중...")
-        users = pg_connector.fetch_users()
-        
-        if not users:
-            logger.warning("마이그레이션할 사용자가 없습니다")
-            pg_connector.close()
-            sys.exit(0)
-        
-        # Cosmos DB 연결 및 마이그레이션
+        # Cosmos DB 연결
         cosmos_connector = CosmosDBConnector(COSMOS_CONFIG)
         if not cosmos_connector.connect():
             logger.error("Cosmos DB 연결 실패로 마이그레이션 중단")
@@ -217,25 +230,60 @@ def main():
             sys.exit(1)
         
         logger.info("=" * 60)
-        logger.info("데이터 마이그레이션 시작")
+        logger.info("데이터 마이그레이션 시작 (배치 처리)")
+        logger.info(f"배치 크기: {MIGRATION_CONFIG['batch_size']}")
         logger.info("=" * 60)
         
-        success_count, fail_count = cosmos_connector.migrate_users(users)
+        # 배치 단위로 마이그레이션
+        batch_size = MIGRATION_CONFIG['batch_size']
+        last_user_id = None
+        total_success = 0
+        total_fail = 0
+        total_processed = 0
+        batch_num = 0
+        
+        while True:
+            batch_num += 1
+            logger.info(f"배치 #{batch_num} 처리 중...")
+            
+            # 배치 데이터 조회
+            users = pg_connector.fetch_users_batch(last_user_id, batch_size)
+            
+            if not users:
+                logger.info("더 이상 마이그레이션할 사용자가 없습니다")
+                break
+            
+            # 배치 마이그레이션
+            success_count, fail_count = cosmos_connector.migrate_users(users)
+            total_success += success_count
+            total_fail += fail_count
+            total_processed += len(users)
+            
+            logger.info(f"배치 #{batch_num} 완료: {len(users)}명 처리 (성공: {success_count}, 실패: {fail_count})")
+            
+            # 마지막 user_id 저장 (다음 배치의 시작점)
+            last_user_id = users[-1]['user_id']
+            
+            # 배치 크기보다 작으면 마지막 배치
+            if len(users) < batch_size:
+                logger.info("마지막 배치 처리 완료")
+                break
         
         # 결과 요약
         logger.info("=" * 60)
         logger.info("마이그레이션 완료")
-        logger.info(f"총 사용자 수: {len(users)}")
-        logger.info(f"성공: {success_count}")
-        logger.info(f"실패: {fail_count}")
+        logger.info(f"총 처리: {total_processed}명")
+        logger.info(f"성공: {total_success}명")
+        logger.info(f"실패: {total_fail}명")
+        logger.info(f"총 배치 수: {batch_num}")
         logger.info("=" * 60)
         
         # PostgreSQL 연결 종료
         pg_connector.close()
         
         # 종료 코드 반환
-        if fail_count > 0:
-            logger.warning("일부 사용자 마이그레이션 실패")
+        if total_fail > 0:
+            logger.warning(f"일부 사용자 마이그레이션 실패 ({total_fail}명)")
             sys.exit(1)
         else:
             logger.info("모든 사용자 마이그레이션 성공!")
