@@ -74,6 +74,11 @@ class DataValidator:
         """PostgreSQL에서 모든 사용자 조회 (배치 처리)"""
         all_users = {}
         batch_size = MIGRATION_CONFIG['batch_size']
+        
+        # 배치 크기가 설정되지 않았으면 오류
+        if batch_size is None:
+            raise RuntimeError("MIGRATION_CONFIG['batch_size'] is not initialized. Call validate_config() first.")
+        
         last_user_id = None
         total_count = 0
         
@@ -137,15 +142,25 @@ class DataValidator:
             raise
     
     def fetch_cosmosdb_users(self):
-        """Cosmos DB에서 모든 사용자 조회"""
+        """Cosmos DB에서 모든 사용자 조회 (배치 처리)"""
+        all_users = {}
         try:
-            query = "SELECT * FROM c ORDER BY c.userId"
-            items = list(self.cosmos_container.query_items(
+            query = "SELECT * FROM c"
+            # 배치로 조회하여 메모리 효율성 향상
+            items = self.cosmos_container.query_items(
                 query=query,
                 enable_cross_partition_query=True
-            ))
-            logger.info(f"Cosmos DB: {len(items)}명 조회")
-            return {item['userId']: item for item in items}
+            )
+            
+            count = 0
+            for item in items:
+                all_users[item['userId']] = item
+                count += 1
+                if count % 1000 == 0:
+                    logger.debug(f"Cosmos DB 조회 진행 중: {count}명")
+            
+            logger.info(f"Cosmos DB: {count}명 조회")
+            return all_users
         except Exception as e:
             logger.error(f"Cosmos DB 데이터 조회 실패: {e}")
             raise
@@ -216,8 +231,10 @@ class DataValidator:
                     'diff_seconds': abs((pg_ts - cosmos_ts).total_seconds())
                 })
         
-        # IP 주소 비교
-        pg_ip = str(pg_user.get('last_login_ip')) if pg_user.get('last_login_ip') else None
+        # IP 주소 비교 (migrate.py와 동일한 로직 적용)
+        pg_ip = pg_user.get('last_login_ip')
+        if pg_ip is not None and not isinstance(pg_ip, str):
+            pg_ip = str(pg_ip)
         cosmos_ip = cosmos_user.get('lastLoginIp')
         
         if pg_ip != cosmos_ip:
@@ -270,7 +287,10 @@ class DataValidator:
                         logger.warning(f"  - {disc['field']}: PG={disc['postgresql']} vs Cosmos={disc['cosmosdb']}")
                 else:
                     matched_users += 1
-                    logger.info(f"✓ 일치: {user_id} ({pg_user['email']})")
+                    logger.debug(f"✓ 일치: {user_id} ({pg_user['email']})")
+                    # 주기적으로 진행 상황 출력
+                    if matched_users % 100 == 0:
+                        logger.info(f"진행 상황: {matched_users + mismatched_users}/{total_users} 검증 완료")
         
         # Cosmos DB에만 있는 사용자 확인
         for user_id in cosmos_users:
@@ -320,6 +340,9 @@ class DataValidator:
 
 def main():
     """메인 실행 함수"""
+    validator = None
+    exit_code = 1  # 기본값: 실패
+    
     try:
         # 환경 변수 검증
         logger.info("환경 변수 검증 중...")
@@ -332,17 +355,23 @@ def main():
             sys.exit(1)
         
         if not validator.connect_cosmosdb():
-            validator.close()
             sys.exit(1)
         
         is_valid = validator.validate()
-        validator.close()
+        exit_code = 0 if is_valid else 1
         
-        sys.exit(0 if is_valid else 1)
-        
+    except KeyboardInterrupt:
+        logger.warning("사용자에 의해 검증이 중단되었습니다")
+        exit_code = 130
     except Exception as e:
         logger.error(f"검증 중 오류 발생: {e}", exc_info=True)
-        sys.exit(1)
+        exit_code = 1
+    finally:
+        # 연결 종료 보장
+        if validator:
+            validator.close()
+    
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

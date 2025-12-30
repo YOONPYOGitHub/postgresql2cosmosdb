@@ -29,6 +29,16 @@ class PostgreSQLConnector:
         self.config = config
         self.connection = None
     
+    def __enter__(self):
+        """Context manager 진입"""
+        self.connect()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager 종료 - 자동으로 연결 해제"""
+        self.close()
+        return False
+    
     def connect(self):
         """PostgreSQL 데이터베이스 연결"""
         try:
@@ -108,6 +118,9 @@ class PostgreSQLConnector:
 class CosmosDBConnector:
     """Cosmos DB 연결 및 데이터 삽입"""
     
+    # 클래스 레벨에서 credential 캐싱
+    _credential = None
+    
     def __init__(self, config):
         self.config = config
         self.client = None
@@ -121,11 +134,14 @@ class CosmosDBConnector:
             # 로컬: Azure CLI (로그인 필요)
             # Azure: Managed Identity 자동 사용
             logger.info("Microsoft Entra ID 인증을 사용하여 Cosmos DB 연결 중...")
-            credential = DefaultAzureCredential()
+            
+            # Credential 재사용 (토큰 캐싱 최적화)
+            if CosmosDBConnector._credential is None:
+                CosmosDBConnector._credential = DefaultAzureCredential()
             
             self.client = CosmosClient(
                 self.config['endpoint'],
-                credential
+                CosmosDBConnector._credential
             )
             
             # 데이터베이스 가져오기 (없으면 생성)
@@ -157,8 +173,10 @@ class CosmosDBConnector:
         def to_iso_string(dt):
             return dt.isoformat() if dt else None
         
-        # IP 주소를 문자열로 변환
-        last_login_ip = str(pg_user['last_login_ip']) if pg_user['last_login_ip'] else None
+        # IP 주소를 문자열로 변환 (psycopg2가 이미 문자열로 변환하지만 안전성을 위해 확인)
+        last_login_ip = pg_user['last_login_ip']
+        if last_login_ip is not None and not isinstance(last_login_ip, str):
+            last_login_ip = str(last_login_ip)
         
         cosmos_doc = {
             'id': pg_user['user_id'],  # Cosmos DB의 고유 id
@@ -180,8 +198,11 @@ class CosmosDBConnector:
         try:
             self.container.upsert_item(user_doc)
             return True
+        except exceptions.CosmosHttpResponseError as e:
+            logger.error(f"사용자 '{user_doc['id']}' 삽입 실패 (HTTP {e.status_code}): {e.message}")
+            return False
         except Exception as e:
-            logger.error(f"사용자 '{user_doc['id']}' 삽입 실패: {e}")
+            logger.error(f"사용자 '{user_doc['id']}' 삽입 실패 (예상치 못한 오류): {e}")
             return False
     
     def migrate_users(self, pg_users):
@@ -194,7 +215,7 @@ class CosmosDBConnector:
                 cosmos_doc = self.transform_user_data(pg_user)
                 if self.upsert_user(cosmos_doc):
                     success_count += 1
-                    logger.info(f"✓ 사용자 '{cosmos_doc['id']}' 마이그레이션 완료")
+                    logger.debug(f"✓ 사용자 '{cosmos_doc['id']}' 마이그레이션 완료")
                 else:
                     fail_count += 1
             except Exception as e:
@@ -209,6 +230,9 @@ def main():
     logger.info("=" * 60)
     logger.info("PostgreSQL -> Cosmos DB 마이그레이션 시작")
     logger.info("=" * 60)
+    
+    pg_connector = None
+    exit_code = 1  # 기본값: 실패
     
     try:
         # 환경 변수 검증
@@ -226,7 +250,6 @@ def main():
         cosmos_connector = CosmosDBConnector(COSMOS_CONFIG)
         if not cosmos_connector.connect():
             logger.error("Cosmos DB 연결 실패로 마이그레이션 중단")
-            pg_connector.close()
             sys.exit(1)
         
         logger.info("=" * 60)
@@ -278,20 +301,26 @@ def main():
         logger.info(f"총 배치 수: {batch_num}")
         logger.info("=" * 60)
         
-        # PostgreSQL 연결 종료
-        pg_connector.close()
-        
-        # 종료 코드 반환
+        # 결과에 따른 종료 코드 설정
         if total_fail > 0:
             logger.warning(f"일부 사용자 마이그레이션 실패 ({total_fail}명)")
-            sys.exit(1)
+            exit_code = 1
         else:
             logger.info("모든 사용자 마이그레이션 성공!")
-            sys.exit(0)
+            exit_code = 0
             
+    except KeyboardInterrupt:
+        logger.warning("사용자에 의해 마이그레이션이 중단되었습니다")
+        exit_code = 130
     except Exception as e:
         logger.error(f"마이그레이션 중 오류 발생: {e}", exc_info=True)
-        sys.exit(1)
+        exit_code = 1
+    finally:
+        # PostgreSQL 연결 종료 보장
+        if pg_connector and pg_connector.connection:
+            pg_connector.close()
+    
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
